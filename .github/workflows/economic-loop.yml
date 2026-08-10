@@ -1,0 +1,19 @@
+name: economic-loop
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  economic-loop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: |
+          bash -n loop/economic_loop.sh
+          bash -n demo/fake_codex.sh
+          bash -n demo/test_economic_loop.sh
+      - name: Deterministic accounting test
+        run: bash demo/test_economic_loop.sh
