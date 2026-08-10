@@ -8,7 +8,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="${CODEX_HOME:-$HOME/.codex}/skills"
 
 mkdir -p "$DEST"
-for skill in loop flash deepseek luna sol build utility; do
+for skill in loop earn flash deepseek luna sol build utility; do
   rm -rf "$DEST/$skill"
   cp -R "$HERE/skills/$skill" "$DEST/$skill"
   echo "installed $skill -> $DEST/$skill"
