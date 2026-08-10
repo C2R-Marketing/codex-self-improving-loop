@@ -5,6 +5,8 @@ on:
     paths:
       - "loop/economics.py"
       - "loop/economic_loop.py"
+      - "loop/economic_watcher.md"
+      - "tests/test_economic_governor.py"
       - "demo/test_economics.py"
       - ".github/workflows/economic-loop-tests.yml"
   workflow_dispatch:
@@ -21,6 +23,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Unit tests
-        run: python -m unittest demo/test_economics.py
+        run: python -m unittest demo/test_economics.py tests/test_economic_governor.py
       - name: Syntax compile
-        run: python -m py_compile loop/economics.py loop/economic_loop.py
+        run: python -m py_compile loop/economics.py loop/economic_loop.py tests/test_economic_governor.py
