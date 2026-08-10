@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-#
 # loop.sh - self-improving loop
-# runner (DeepSeek) runs prompt.md, watcher (Luna) grades, rewriter (Sol) rewrites.
-#
+# runner executes prompt.md, watcher independently grades, rewriter improves prompt.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CODECX="${CODEX_BIN:-codex}"
-
-# ---- defaults -----------------------------------------------------------
+CODEX="${CODEX_BIN:-codex}"
 RUNNER_MODEL="${RUNNER_MODEL:-opencode-go/deepseek-v4-flash}"
 WATCHER_MODEL="${WATCHER_MODEL:-gpt-5.6-luna}"
 REWRITER_MODEL="${REWRITER_MODEL:-gpt-5.6-sol}"
@@ -24,14 +20,14 @@ CYCLES_DIR="${CYCLES_DIR:-$HERE/cycles}"
 usage() {
   cat <<'EOF'
 Usage: loop.sh [options]
-  --runner-model SLUG    model that runs the task (default: opencode-go/deepseek-v4-flash)
-  --watcher-model SLUG   model that grades the run (default: gpt-5.6-luna)
-  --rewriter-model SLUG  model that rewrites prompt.md (default: gpt-5.6-sol)
-  --max-cycles N         stop after N cycles (default: 6)
-  --no-progress-stop N   stop after N cycles with no prompt change (default: 2)
-  --every SECONDS        wait between cycles (default: 0)
-  --utility NAME         pick models from the utility menu (fast, deep, luna, sol, build)
-  --workdir DIR          directory holding prompt.md and log.md (default: current dir)
+  --runner-model SLUG
+  --watcher-model SLUG
+  --rewriter-model SLUG
+  --max-cycles N
+  --no-progress-stop N
+  --every SECONDS
+  --utility NAME
+  --workdir DIR
 EOF
 }
 
@@ -51,56 +47,35 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$UTILITY" in
-  "")
-    ;;
-  fast|flash)
-    RUNNER_MODEL="opencode-go/deepseek-v4-flash"
-    ;;
-  deep|deepseek)
-    RUNNER_MODEL="opencode-go/deepseek-v4-pro"
-    ;;
-  luna|grade|watch)
-    WATCHER_MODEL="gpt-5.6-luna"
-    ;;
-  sol|review|rewrite)
-    REWRITER_MODEL="gpt-5.6-sol"
-    ;;
-  build|implement)
-    RUNNER_MODEL="opencode-go/deepseek-v4-pro"
-    ;;
-  *)
-    echo "unknown utility: $UTILITY" >&2
-    usage
-    exit 2
-    ;;
+  "") ;;
+  fast|flash) RUNNER_MODEL="opencode-go/deepseek-v4-flash" ;;
+  deep|deepseek|build|implement) RUNNER_MODEL="opencode-go/deepseek-v4-pro" ;;
+  luna|grade|watch) WATCHER_MODEL="gpt-5.6-luna" ;;
+  sol|review|rewrite) REWRITER_MODEL="gpt-5.6-sol" ;;
+  *) echo "unknown utility: $UTILITY" >&2; exit 2 ;;
 esac
 
 prompt="$WORKDIR/prompt.md"
 log="$WORKDIR/log.md"
-if [[ ! -f "$prompt" ]]; then
-  echo "missing $prompt (copy prompt.md into your project and write the task there)" >&2
-  exit 2
-fi
+[[ -f "$prompt" ]] || { echo "missing $prompt" >&2; exit 2; }
+[[ -f "$WATCHER_FILE" ]] || { echo "missing $WATCHER_FILE" >&2; exit 2; }
+[[ -f "$REWRITER_FILE" ]] || { echo "missing $REWRITER_FILE" >&2; exit 2; }
 [[ -f "$log" ]] || : > "$log"
 mkdir -p "$CYCLES_DIR"
 
 sha256_file() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  else
-    md5sum "$1" | awk '{print $1}'
-  fi
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
 codex_exec() {
   local model="$1" sandbox="$2" input="$3" output="$4"
-  "$CODECX" exec -m "$model" -s "$sandbox" -C "$WORKDIR" \
+  "$CODEX" exec -m "$model" -s "$sandbox" -C "$WORKDIR" \
     --skip-git-repo-check --ephemeral -o "$output" - < "$input"
 }
 
-printf 'Loop start\n  workdir=%s\n  runner=%s\n  watcher=%s\n  rewriter=%s\n  max_cycles=%s no_progress_stop=%s every=%s\n' \
-  "$WORKDIR" "$RUNNER_MODEL" "$WATCHER_MODEL" "$REWRITER_MODEL" \
-  "$MAX_CYCLES" "$NO_PROGRESS_LIMIT" "$EVERY"
+printf 'Loop start\n  workdir=%s\n  runner=%s\n  watcher=%s\n  rewriter=%s\n' \
+  "$WORKDIR" "$RUNNER_MODEL" "$WATCHER_MODEL" "$REWRITER_MODEL"
 
 cycle=1
 no_progress_streak=0
@@ -112,74 +87,64 @@ while (( cycle <= MAX_CYCLES )); do
   run_out="$CYCLES_DIR/cycle-$tag-run.md"
   watch_out="$CYCLES_DIR/cycle-$tag-watch.md"
   rewrite_out="$CYCLES_DIR/cycle-$tag-rewrite.md"
+  watcher_input="$CYCLES_DIR/cycle-$tag-watch-input.md"
+  rewriter_input="$CYCLES_DIR/cycle-$tag-rewrite-input.md"
   before="$(sha256_file "$prompt")"
 
   printf '\n=== cycle %d/%d ===\n' "$cycle" "$MAX_CYCLES"
-  printf '[runner] %s running task...\n' "$RUNNER_MODEL"
   codex_exec "$RUNNER_MODEL" workspace-write "$prompt" "$run_out"
-
   {
     printf '\n## Cycle %s\n### run (%s)\n' "$tag" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     cat "$run_out"
   } >> "$log"
 
-  if grep -qiE '^DONE:' "$run_out"; then
+  # Completion is NEVER accepted from the runner alone. The watcher always runs.
+  {
+    cat "$WATCHER_FILE"
+    printf '\n--- current prompt.md ---\n'; cat "$prompt"
+    printf '\n--- latest runner output ---\n'; cat "$run_out"
+    printf '\n--- recent log.md ---\n'; tail -n 160 "$log"
+  } > "$watcher_input"
+  codex_exec "$WATCHER_MODEL" read-only "$watcher_input" "$watch_out"
+  {
+    printf '\n### watch (%s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    cat "$watch_out"
+  } >> "$log"
+
+  accept="$(awk -F': ' '/^ACCEPT:/{print tolower($2); exit}' "$watch_out" | tr -d '[:space:]')"
+  next="$(awk -F': ' '/^NEXT:/{sub(/^NEXT:[[:space:]]*/, ""); print; exit}' "$watch_out")"
+  if [[ "$accept" == "yes" && "${next^^}" == "STOP" ]]; then
     status="done"
     last_progress="$cycle"
-    printf '[runner] reported DONE: task complete.\n'
-  else
-    printf '[watcher] %s grading...\n' "$WATCHER_MODEL"
-    {
-      cat "$WATCHER_FILE"
-      printf '\n--- current prompt.md ---\n'
-      cat "$prompt"
-      printf '\n--- recent log.md ---\n'
-      tail -n 120 "$log"
-    } > /tmp/loop-watcher-input.md
-    codex_exec "$WATCHER_MODEL" read-only /tmp/loop-watcher-input.md "$watch_out"
-    {
-      printf '\n### watch (%s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      cat "$watch_out"
-    } >> "$log"
-
-    printf '[rewriter] %s rewriting prompt.md...\n' "$REWRITER_MODEL"
-    {
-      cat "$REWRITER_FILE"
-      printf '\n--- current prompt.md ---\n'
-      cat "$prompt"
-      printf '\n--- recent log.md ---\n'
-      tail -n 160 "$log"
-    } > /tmp/loop-rewriter-input.md
-    codex_exec "$REWRITER_MODEL" workspace-write /tmp/loop-rewriter-input.md "$rewrite_out"
-    {
-      printf '\n### rewrite (%s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      cat "$rewrite_out"
-    } >> "$log"
-  fi
-
-  if [[ "$status" == "done" ]]; then
+    printf '[watcher] independently accepted completion.\n'
     break
   fi
+
+  printf '[rewriter] %s rewriting prompt.md...\n' "$REWRITER_MODEL"
+  {
+    cat "$REWRITER_FILE"
+    printf '\n--- current prompt.md ---\n'; cat "$prompt"
+    printf '\n--- latest watcher grade ---\n'; cat "$watch_out"
+    printf '\n--- recent log.md ---\n'; tail -n 180 "$log"
+  } > "$rewriter_input"
+  codex_exec "$REWRITER_MODEL" workspace-write "$rewriter_input" "$rewrite_out"
+  {
+    printf '\n### rewrite (%s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    cat "$rewrite_out"
+  } >> "$log"
 
   after="$(sha256_file "$prompt")"
   if [[ "$before" == "$after" ]]; then
     no_progress_streak=$((no_progress_streak + 1))
-    printf '[loop] no prompt change (streak %d)\n' "$no_progress_streak"
   else
     no_progress_streak=0
     last_progress="$cycle"
-    printf '[loop] prompt.md changed (last progress cycle %d)\n' "$cycle"
   fi
-
   if (( no_progress_streak >= NO_PROGRESS_LIMIT )); then
     status="no-progress"
-    printf '[loop] stopping: %d consecutive cycles without progress\n' "$no_progress_streak"
     break
   fi
-  if (( EVERY > 0 )) && (( cycle < MAX_CYCLES )); then
-    printf '[loop] waiting %s seconds...\n' "$EVERY"
-    sleep "$EVERY"
-  fi
+  if (( EVERY > 0 )) && (( cycle < MAX_CYCLES )); then sleep "$EVERY"; fi
   cycle=$((cycle + 1))
 done
 
@@ -193,7 +158,6 @@ cat > "$CYCLES_DIR/state.json" <<EOF
   "rewriter_model": "$REWRITER_MODEL"
 }
 EOF
-
 printf '\n=== loop finished: %s after %d cycle(s) ===\n' "$status" "$cycle"
 echo "log: $log"
 echo "state: $CYCLES_DIR/state.json"
