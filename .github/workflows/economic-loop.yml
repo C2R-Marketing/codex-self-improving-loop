@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   economic-loop:
     runs-on: ubuntu-latest
@@ -16,4 +19,6 @@ jobs:
           bash -n demo/fake_codex.sh
           bash -n demo/test_economic_loop.sh
       - name: Deterministic accounting test
-        run: bash demo/test_economic_loop.sh
+        run: |
+          chmod +x demo/fake_codex.sh
+          bash demo/test_economic_loop.sh
